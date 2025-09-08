@@ -1,5 +1,4 @@
 import streamlit as st
-from ChamoVersion import app  
 from db import test_connection, get_session, User, Product, Store
 
 st.set_page_config(page_title="Sistema Panadería", layout="centered")
@@ -27,4 +26,5 @@ else:
     st.error("Error de conexión - verifica credenciales de Aiven")
 
 st.info("Login: admin / admin123")
+
 
