@@ -55,6 +55,10 @@ def require_role(*roles):
         return False
     return u.get("role") in roles
 
+# Inicializar bandera de reinicio
+if "should_rerun" not in st.session_state:
+    st.session_state["should_rerun"] = False
+
 # --- SESSION STATE ---
 if "user" not in st.session_state:
     st.session_state["user"] = None
@@ -754,3 +758,4 @@ st.markdown("""
     <em>Credenciales demo: admin / admin123</em>
 </div>
 """, unsafe_allow_html=True)
+
