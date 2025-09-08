@@ -111,7 +111,8 @@ if st.session_state["user"] is None:
                 if user:
                     st.session_state["user"] = user
                     st.success(f"¡Bienvenido {user.get('username')}!")
-                    st.rerun()
+                    st.session_state["should_rerun"] = True
+
                 else:
                     st.error("❌ Usuario o contraseña inválidos")
             else:
@@ -758,4 +759,5 @@ st.markdown("""
     <em>Credenciales demo: admin / admin123</em>
 </div>
 """, unsafe_allow_html=True)
+
 
