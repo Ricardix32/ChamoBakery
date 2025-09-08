@@ -760,10 +760,3 @@ st.markdown("""
     <em>Credenciales demo: admin / admin123</em>
 </div>
 """, unsafe_allow_html=True)
-
-# --- EJECUTAR RERUN SI ESTÁ MARCADO ---
-if st.session_state.get("should_rerun"):
-    st.session_state["should_rerun"] = False
-    st.rerun()
-
-
