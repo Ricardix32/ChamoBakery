@@ -150,7 +150,8 @@ else:
     if st.sidebar.button("🚪 Cerrar sesión"):
         st.session_state["user"] = None
         st.session_state["carrito"] = {}
-        st.rerun()
+        st.session_state["should_rerun"] = True
+
 
 # --- NAVEGACIÓN ---
 st.sidebar.markdown("---")
@@ -759,5 +760,6 @@ st.markdown("""
     <em>Credenciales demo: admin / admin123</em>
 </div>
 """, unsafe_allow_html=True)
+
 
 
