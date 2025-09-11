@@ -3,3 +3,4 @@ werkzeug==2.3.7
 pandas==2.2.0
 sqlalchemy==2.0.40
 psycopg2-binary==2.9.9
+fpdf==1.7.2
