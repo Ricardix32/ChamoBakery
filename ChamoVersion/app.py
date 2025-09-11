@@ -5,12 +5,16 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
+from datetime import datetime
+from fpdf import FPDF
+import base64
+
 
 # Importar desde tu db.py
 try:
     from db import (
         engine, get_session, init_db,
-        Store, Supplier, Ingredient, Product, Order, OrderItem, User
+        Store, Supplier, Ingredient, Product, Order, OrderItem, User, Customer
     )
 except ImportError as e:
     st.error(f"Error al importar db.py: {e}")
@@ -36,6 +40,168 @@ def format_money(x):
     except Exception:
         return str(x)
 
+# Función corregida para generar PDF
+from fpdf import FPDF
+
+def generar_pdf(ticket_html, filename):
+    try:
+        import re
+        from html import unescape
+        from datetime import datetime
+        
+        # Función helper para extraer texto del HTML
+        def extraer_texto(patron, html, default=""):
+            match = re.search(patron, html, re.DOTALL | re.IGNORECASE)
+            return unescape(match.group(1).strip()) if match else default
+        
+        # Extraer información del ticket
+        orden_id = extraer_texto(r'TICKET DE VENTA #(\d+)', ticket_html, "N/A")
+        fecha = extraer_texto(r'Fecha: ([^<\n]+)', ticket_html, datetime.now().strftime("%d/%m/%Y %H:%M"))
+        cajero = extraer_texto(r'Cajero: ([^<\n]+)', ticket_html, "N/A")
+        total = extraer_texto(r'TOTAL:\s*([^<\n]+)', ticket_html, "S/ 0.00")
+        
+        # Extraer datos de la tienda
+        tienda_nombre = extraer_texto(r'<h2[^>]*>([^<]+)</h2>', ticket_html, "Panadería El Buen Pan")
+        tienda_direccion = extraer_texto(r'<p[^>]*>([^<]+)</p>', ticket_html, "Av. Principal 123, Lima")
+        tienda_telefono = extraer_texto(r'Tel:\s*([^<\n]+)', ticket_html, "999-888-777")
+        
+        # Extraer información del cliente
+        cliente_info = None
+        if "CLIENTE:" in ticket_html:
+            cliente_match = re.search(r'CLIENTE:</strong><br>\s*([^<]+)<br>\s*([^<]+)<br>(?:\s*([^<]+)<br>)?', ticket_html, re.DOTALL)
+            if cliente_match:
+                cliente_info = {
+                    'nombre': cliente_match.group(1).strip(),
+                    'documento': cliente_match.group(2).strip(),
+                    'telefono': cliente_match.group(3).strip() if cliente_match.group(3) else ""
+                }
+        
+        # Extraer items de la tabla
+        items = []
+        tabla_match = re.search(r'<tbody>(.*?)</tbody>', ticket_html, re.DOTALL)
+        if tabla_match:
+            filas = re.findall(r'<tr[^>]*>(.*?)</tr>', tabla_match.group(1), re.DOTALL)
+            for fila in filas:
+                celdas = re.findall(r'<td[^>]*[^>]*>([^<]*)</td>', fila, re.DOTALL)
+                if len(celdas) >= 4:
+                    items.append({
+                        'producto': celdas[0].strip(),
+                        'cantidad': celdas[1].strip(),
+                        'precio': celdas[2].strip(),
+                        'subtotal': celdas[3].strip()
+                    })
+        
+        # Crear PDF
+        pdf = FPDF("P", "mm", (80, 200))
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 12)
+        
+        # Encabezado
+        pdf.cell(0, 8, tienda_nombre.replace("🥖", "").strip(), ln=True, align="C")
+        pdf.set_font("Arial", size=9)
+        pdf.cell(0, 5, tienda_direccion, ln=True, align="C")
+        pdf.cell(0, 5, f"Tel: {tienda_telefono}", ln=True, align="C")
+        pdf.ln(5)
+        pdf.cell(0, 0, "-"*32, ln=True, align="C")
+        pdf.ln(3)
+
+        # Info de ticket
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 5, f"Ticket: #{orden_id}", ln=True)
+        pdf.set_font("Arial", size=9)
+        pdf.cell(0, 5, f"Fecha: {fecha}", ln=True)
+        pdf.cell(0, 5, f"Cajero: {cajero}", ln=True)
+        
+        # Información del cliente si existe
+        if cliente_info:
+            pdf.ln(3)
+            pdf.cell(0, 0, "-"*32, ln=True, align="C")
+            pdf.ln(2)
+            pdf.set_font("Arial", "B", 9)
+            pdf.cell(0, 4, "CLIENTE:", ln=True)
+            pdf.set_font("Arial", size=8)
+            pdf.cell(0, 4, cliente_info['nombre'], ln=True)
+            pdf.cell(0, 4, cliente_info['documento'], ln=True)
+            if cliente_info['telefono']:
+                pdf.cell(0, 4, cliente_info['telefono'], ln=True)
+        
+        pdf.ln(3)
+        pdf.cell(0, 0, "-"*32, ln=True, align="C")
+        pdf.ln(3)
+
+        # Tabla de items con datos reales
+        pdf.set_font("Courier", "B", 8)
+        pdf.set_left_margin(8)
+        
+        # Encabezados de tabla
+        pdf.cell(22, 5, "Producto", border=0)
+        pdf.cell(8, 5, "Cant", border=0, align="R")
+        pdf.cell(12, 5, "P.Unit", border=0, align="R")
+        pdf.cell(18, 5, "Total", border=0, align="R")
+        pdf.ln(5)
+        
+        # Items reales
+        pdf.set_font("Courier", size=8)
+        for item in items:
+            # Truncar nombre del producto si es muy largo
+            producto_nombre = item['producto'][:12] + "." if len(item['producto']) > 12 else item['producto']
+            
+            pdf.cell(22, 5, producto_nombre, border=0)
+            pdf.cell(8, 5, item['cantidad'], border=0, align="R")
+            pdf.cell(12, 5, item['precio'].replace("S/ ", ""), border=0, align="R")
+            pdf.cell(18, 5, item['subtotal'].replace("S/ ", ""), border=0, align="R")
+            pdf.ln(5)
+
+        # Restaurar márgenes
+        pdf.set_left_margin(10)
+        
+        pdf.ln(3)
+        pdf.cell(0, 0, "-"*32, ln=True, align="C")
+        pdf.ln(5)
+
+        # Total centrado con datos reales
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 6, f"TOTAL: {total}", ln=True, align="C")
+
+        pdf.ln(5)
+        pdf.cell(0, 0, "-"*32, ln=True, align="C")
+        pdf.ln(8)
+
+        # Footer
+        pdf.set_font("Arial", "I", 9)
+        pdf.multi_cell(0, 5, "¡Gracias por su compra!\nVuelva pronto", align="C")
+
+        # Manejar output correctamente
+        pdf_output = pdf.output(dest="S")
+        
+        if isinstance(pdf_output, str):
+            return pdf_output.encode("latin-1")
+        elif isinstance(pdf_output, bytearray):
+            return bytes(pdf_output)
+        elif isinstance(pdf_output, bytes):
+            return pdf_output
+        else:
+            return bytes(str(pdf_output), "latin-1")
+
+    except Exception as e:
+        # PDF de error
+        try:
+            error_pdf = FPDF("P", "mm", (80, 100))
+            error_pdf.add_page()
+            error_pdf.set_font("Arial", "B", 10)
+            error_pdf.cell(0, 8, "ERROR EN TICKET", ln=True, align="C")
+            error_pdf.set_font("Arial", size=8)
+            error_pdf.cell(0, 5, f"Error: {str(e)[:30]}", ln=True, align="C")
+            
+            error_output = error_pdf.output(dest="S")
+            if isinstance(error_output, bytearray):
+                return bytes(error_output)
+            elif isinstance(error_output, str):
+                return error_output.encode("latin-1")
+            else:
+                return bytes(error_output)
+        except:
+            return b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 400]>>endobj xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n189\n%%EOF"
 def login_user(username, password):
     session = get_session()
     try:
@@ -55,9 +221,142 @@ def require_role(*roles):
         return False
     return u.get("role") in roles
 
-# Inicializar bandera de reinicio
-if "should_rerun" not in st.session_state:
-    st.session_state["should_rerun"] = False
+def generate_ticket_html(order, items_data, store_data, customer_data=None):
+    """Genera el HTML del ticket de venta"""
+    fecha = order.ts.strftime("%d/%m/%Y %H:%M")
+    
+    customer_info = ""
+    if customer_data:
+        customer_info = f"""
+        <div style="margin: 10px 0; padding: 5px; border: 1px solid #ddd;">
+            <strong>CLIENTE:</strong><br>
+            {customer_data['name']} {customer_data.get('last_name', '')}<br>
+            {customer_data.get('document_type', 'DNI')}: {customer_data.get('document_number', 'N/A')}<br>
+            {f"Tel: {customer_data['phone']}" if customer_data.get('phone') else ""}
+        </div>
+        """
+    
+    items_html = ""
+    for item in items_data:
+        items_html += f"""
+        <tr>
+            <td style="text-align: left; padding: 2px;">{item['producto']}</td>
+            <td style="text-align: center; padding: 2px;">{item['cantidad']}</td>
+            <td style="text-align: right; padding: 2px;">{item['precio_unit']}</td>
+            <td style="text-align: right; padding: 2px;">{item['subtotal']}</td>
+        </tr>
+        """
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Ticket de Venta #{order.id}</title>
+        <style>
+            body {{
+                font-family: 'Courier New', monospace;
+                font-size: 12px;
+                margin: 0;
+                padding: 20px;
+                max-width: 300px;
+                margin: 0 auto;
+            }}
+            .header {{
+                text-align: center;
+                margin-bottom: 15px;
+                border-bottom: 1px dashed #000;
+                padding-bottom: 10px;
+            }}
+            .ticket-info {{
+                margin: 10px 0;
+                font-size: 11px;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin: 10px 0;
+            }}
+            th, td {{
+                padding: 2px;
+                font-size: 10px;
+            }}
+            .total {{
+                border-top: 1px dashed #000;
+                margin-top: 10px;
+                padding-top: 5px;
+                text-align: right;
+                font-weight: bold;
+                font-size: 14px;
+            }}
+            .footer {{
+                text-align: center;
+                margin-top: 15px;
+                border-top: 1px dashed #000;
+                padding-top: 10px;
+                font-size: 10px;
+            }}
+            @media print {{
+                body {{ margin: 0; padding: 10px; }}
+                .no-print {{ display: none; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h2 style="margin: 0;">🥖 {store_data['name']}</h2>
+            <p style="margin: 2px 0;">{store_data.get('address', '')}</p>
+            <p style="margin: 2px 0;">Tel: {store_data.get('phone', 'N/A')}</p>
+        </div>
+        
+        <div class="ticket-info">
+            <strong>TICKET DE VENTA #{order.id}</strong><br>
+            Fecha: {fecha}<br>
+            Cajero: {order.user.username}
+        </div>
+        
+        {customer_info}
+        
+        <table>
+            <thead>
+                <tr style="border-bottom: 1px solid #000;">
+                    <th style="text-align: left;">Producto</th>
+                    <th style="text-align: center;">Cant.</th>
+                    <th style="text-align: right;">P.Unit</th>
+                    <th style="text-align: right;">Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                {items_html}
+            </tbody>
+        </table>
+        
+        <div class="total">
+            TOTAL: {format_money(order.total)}
+        </div>
+        
+        <div class="footer">
+            ¡Gracias por su compra!<br>
+            Vuelva pronto 😊
+        </div>
+        
+        <div class="no-print" style="text-align: center; margin-top: 20px;">
+            <button onclick="window.print()" style="padding: 10px 20px; font-size: 14px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer;">
+                🖨️ Imprimir Ticket
+            </button>
+            <button onclick="window.close()" style="padding: 10px 20px; font-size: 14px; background: #6c757d; color: white; border: none; border-radius: 5px; cursor: pointer; margin-left: 10px;">
+                ❌ Cerrar
+            </button>
+        </div>
+        
+        <script>
+            // Auto-imprimir al cargar (opcional)
+            // window.onload = function() {{ window.print(); }}
+        </script>
+    </body>
+    </html>
+    """
+    return html
 
 # --- SESSION STATE ---
 if "user" not in st.session_state:
@@ -70,7 +369,7 @@ try:
     session = get_session()
     try:
         if session.query(Store).count() == 0:
-            session.add(Store(name="Tienda Central", address="Av. Principal 123", phone="999-888-777"))
+            session.add(Store(name="Panadería El Buen Pan", address="Av. Principal 123, Lima", phone="999-888-777"))
         if session.query(User).count() == 0:
             admin_pw = generate_password_hash("admin123")
             session.add(User(username="admin", password=admin_pw, role="admin"))
@@ -87,6 +386,12 @@ try:
                 Product(sku="PAN-002", name="Pan dulce", price=Decimal("0.80"), category="Dulces"),
                 Product(sku="TORTA-001", name="Torta de chocolate", price=Decimal("15.50"), category="Tortas"),
                 Product(sku="GALLETA-001", name="Galletas de avena", price=Decimal("2.50"), category="Galletas"),
+            ])
+        if session.query(Customer).count() == 0:
+            session.add_all([
+                Customer(name="Cliente", last_name="General", document_type="DNI", document_number="00000000", phone="000-000-000"),
+                Customer(name="María", last_name="García", document_type="DNI", document_number="12345678", phone="999-111-222", email="maria@email.com"),
+                Customer(name="Carlos", last_name="López", document_type="DNI", document_number="87654321", phone="999-333-444"),
             ])
         session.commit()
     finally:
@@ -111,8 +416,7 @@ if st.session_state["user"] is None:
                 if user:
                     st.session_state["user"] = user
                     st.success(f"¡Bienvenido {user.get('username')}!")
-                    st.session_state["should_rerun"] = True
-
+                    st.rerun()
                 else:
                     st.error("❌ Usuario o contraseña inválidos")
             else:
@@ -150,13 +454,12 @@ else:
     if st.sidebar.button("🚪 Cerrar sesión"):
         st.session_state["user"] = None
         st.session_state["carrito"] = {}
-        st.session_state["should_rerun"] = True
-
+        st.rerun()
 
 # --- NAVEGACIÓN ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("📋 Menú")
-menu_options = ["🏠 Dashboard", "🛒 Productos", "💰 Ventas (POS)"]
+menu_options = ["🏠 Dashboard", "🛒 Productos", "👥 Clientes", "💰 Ventas (POS)"]
 if require_role("admin"):
     menu_options += ["📊 Reportes", "⚙️ Administración"]
 choice = st.sidebar.radio("Navegación", menu_options, label_visibility="collapsed")
@@ -169,15 +472,17 @@ if choice == "🏠 Dashboard":
         try:
             total_prod = session.query(func.count(Product.id)).scalar() or 0
             total_ing = session.query(func.count(Ingredient.id)).scalar() or 0
+            total_customers = session.query(func.count(Customer.id)).scalar() or 0
             total_orders = session.query(func.count(Order.id)).scalar() or 0
             total_sales = session.query(func.coalesce(func.sum(Order.total), 0)).scalar() or 0
         finally:
             session.close()
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("🛒 Productos", total_prod)
         col2.metric("📦 Ingredientes", total_ing)
-        col3.metric("🧾 Órdenes", total_orders)
-        col4.metric("💰 Ventas Total", format_money(total_sales))
+        col3.metric("👥 Clientes", total_customers)
+        col4.metric("🧾 Órdenes", total_orders)
+        col5.metric("💰 Ventas Total", format_money(total_sales))
     except Exception as e:
         st.error(f"Error al cargar dashboard: {e}")
 
@@ -278,6 +583,82 @@ elif choice == "🛒 Productos":
     except Exception as e:
         st.error(f"Error en gestión de productos: {e}")
 
+elif choice == "👥 Clientes":
+    st.title("👥 Gestión de Clientes")
+    
+    try:
+        session = get_session()
+        try:
+            clientes = session.query(Customer).filter_by(is_active=True).order_by(Customer.name).all()
+        finally:
+            session.close()
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.subheader("📋 Lista de Clientes")
+            
+            if clientes:
+                df = pd.DataFrame([{
+                    "ID": c.id,
+                    "Nombre Completo": f"{c.name} {c.last_name or ''}".strip(),
+                    "Documento": f"{c.document_type}: {c.document_number}" if c.document_number else "N/A",
+                    "Teléfono": c.phone or "N/A",
+                    "Email": c.email or "N/A",
+                    "Registrado": c.created_at.strftime("%d/%m/%Y") if c.created_at else "N/A"
+                } for c in clientes])
+                
+                st.dataframe(df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No hay clientes registrados")
+        
+        with col2:
+            st.subheader("➕ Nuevo Cliente")
+            
+            with st.form("customer_form"):
+                nombre = st.text_input("Nombre *", placeholder="María")
+                apellido = st.text_input("Apellido", placeholder="García")
+                
+                col_doc1, col_doc2 = st.columns(2)
+                with col_doc1:
+                    doc_type = st.selectbox("Tipo Doc.", ["DNI", "RUC", "CE", "Pasaporte"])
+                with col_doc2:
+                    doc_number = st.text_input("Número", placeholder="12345678")
+                
+                telefono = st.text_input("Teléfono", placeholder="999-123-456")
+                email = st.text_input("Email", placeholder="cliente@email.com")
+                direccion = st.text_area("Dirección", placeholder="Av. Principal 123")
+                
+                submit_customer = st.form_submit_button("💾 Registrar Cliente", use_container_width=True)
+                
+                if submit_customer:
+                    if nombre:
+                        try:
+                            session = get_session()
+                            try:
+                                nuevo_cliente = Customer(
+                                    name=nombre,
+                                    last_name=apellido,
+                                    document_type=doc_type,
+                                    document_number=doc_number if doc_number else None,
+                                    phone=telefono if telefono else None,
+                                    email=email if email else None,
+                                    address=direccion if direccion else None
+                                )
+                                session.add(nuevo_cliente)
+                                session.commit()
+                                st.success("✅ Cliente registrado exitosamente")
+                                st.rerun()
+                            finally:
+                                session.close()
+                        except Exception as e:
+                            st.error(f"❌ Error: {e}")
+                    else:
+                        st.error("❌ El nombre es obligatorio")
+    
+    except Exception as e:
+        st.error(f"Error en gestión de clientes: {e}")
+
 elif choice == "💰 Ventas (POS)":
     st.title("💰 Punto de Venta (POS)")
     
@@ -289,6 +670,7 @@ elif choice == "💰 Ventas (POS)":
         session = get_session()
         try:
             productos = session.query(Product).filter_by(is_active=True).order_by(Product.name).all()
+            clientes = session.query(Customer).filter_by(is_active=True).order_by(Customer.name).all()
             store = session.query(Store).first()
         finally:
             session.close()
@@ -296,6 +678,16 @@ elif choice == "💰 Ventas (POS)":
         # Información del cajero
         user = st.session_state["user"]
         st.info(f"👤 **Cajero:** {user.get('username')} | 🏪 **Tienda:** {store.name if store else 'N/A'}")
+        
+        # Selección de cliente
+        st.subheader("👥 Seleccionar Cliente")
+        cliente_options = [("VENTA GENERAL", None)] + [(f"{c.name} {c.last_name or ''} - {c.document_type}: {c.document_number}".strip(), c.id) for c in clientes]
+        selected_customer = st.selectbox(
+            "Cliente para esta venta:", 
+            cliente_options, 
+            format_func=lambda x: x[0],
+            key="customer_selector"
+        )
         
         col1, col2 = st.columns([3, 2])
         
@@ -363,6 +755,12 @@ elif choice == "💰 Ventas (POS)":
                 df_carrito = pd.DataFrame(items_carrito)
                 st.dataframe(df_carrito, use_container_width=True, hide_index=True)
                 
+                # Cliente seleccionado
+                if selected_customer[1]:
+                    cliente_seleccionado = next((c for c in clientes if c.id == selected_customer[1]), None)
+                    if cliente_seleccionado:
+                        st.info(f"👤 **Cliente:** {cliente_seleccionado.name} {cliente_seleccionado.last_name or ''}")
+                
                 # Total
                 st.markdown(f"### 💰 **Total: {format_money(total_venta)}**")
                 
@@ -383,7 +781,7 @@ elif choice == "💰 Ventas (POS)":
                                 orden = Order(
                                     user_id=user.get("id"), 
                                     store_id=store.id if store else 1,
-                                    customer_id=None,
+                                    customer_id=selected_customer[1],  # Incluir ID del cliente
                                     total=total_venta
                                 )
                                 session.add(orden)
@@ -403,12 +801,81 @@ elif choice == "💰 Ventas (POS)":
                                 
                                 session.commit()
                                 
+                                # Preparar datos para el ticket
+                                orden_completa = session.query(Order).filter_by(id=orden.id).first()
+                                items_ticket = []
+                                for prod_id, qty in carrito.items():
+                                    producto = next((p for p in productos if p.id == prod_id), None)
+                                    if producto:
+                                        subtotal = Decimal(str(qty)) * producto.price
+                                        items_ticket.append({
+                                            "producto": producto.name,
+                                            "cantidad": int(qty),
+                                            "precio_unit": format_money(producto.price),
+                                            "subtotal": format_money(subtotal)
+                                        })
+                                
+                                # Datos del cliente
+                                customer_data = None
+                                customer_info = ""
+                                if selected_customer[1]:
+                                    cliente = next((c for c in clientes if c.id == selected_customer[1]), None)
+                                    if cliente:
+                                        customer_data = {
+                                            "name": cliente.name,
+                                            "last_name": cliente.last_name,
+                                            "document_type": cliente.document_type,
+                                            "document_number": cliente.document_number,
+                                            "phone": cliente.phone
+                                        }
+                                        customer_info = f"""
+                                        <div style="margin: 10px 0; padding: 5px; border: 1px solid #ddd;">
+                                            <strong>CLIENTE:</strong><br>
+                                            {customer_data['name']} {customer_data.get('last_name', '')}<br>
+                                            {customer_data.get('document_type', 'DNI')}: {customer_data.get('document_number', 'N/A')}<br>
+                                            {f"Tel: {customer_data['phone']}" if customer_data.get('phone') else ""}
+                                        </div>
+                                        """
+                                
+                                # Datos de la tienda
+                                store_data = {
+                                    "name": store.name if store else "Panadería",
+                                    "address": store.address if store else "",
+                                    "phone": store.phone if store else ""
+                                }
+                                
+                                # Generar HTML del ticket
+                                ticket_html = generate_ticket_html(orden_completa, items_ticket, store_data, customer_data)
+                                
                                 # Limpiar carrito
                                 st.session_state["carrito"] = {}
                                 
                                 st.success(f"✅ **Venta registrada exitosamente!**\n\n🧾 **Orden #{orden.id}**\n💰 **Total: {format_money(total_venta)}**")
                                 st.balloons()
-                                st.rerun()
+                                
+                                # Botón para mostrar ticket
+                                # Generar HTML del ticket
+                                try:
+                                    ticket_html = generate_ticket_html(orden_completa, items_ticket, store_data, customer_data)
+                                    
+                                    # Generar PDF del ticket
+                                    pdf_bytes = generar_pdf(ticket_html, f"Ticket_Orden_{orden.id}.pdf")
+                                    
+                                    # Botón de descarga directo
+                                    st.download_button(
+                                        "🖨️ Descargar Ticket PDF",
+                                        data=pdf_bytes,
+                                        file_name=f"Ticket_Orden_{orden.id}.pdf",
+                                        mime="application/pdf",
+                                        key=f"download_ticket_{orden.id}"
+                                    )
+                                    
+                                except Exception as pdf_error:
+                                    st.warning(f"⚠️ Venta procesada correctamente, pero hubo un problema al generar el PDF: {pdf_error}")
+                                    st.info("💡 La venta se registró exitosamente en el sistema.")
+
+                                
+                               
                             finally:
                                 session.close()
                         
@@ -417,6 +884,12 @@ elif choice == "💰 Ventas (POS)":
             
             else:
                 st.info("🛒 Carrito vacío\n\nAgrega productos usando los botones de la izquierda")
+                
+                # Mostrar cliente seleccionado incluso con carrito vacío
+                if selected_customer[1]:
+                    cliente_seleccionado = next((c for c in clientes if c.id == selected_customer[1]), None)
+                    if cliente_seleccionado:
+                        st.info(f"👤 **Cliente seleccionado:** {cliente_seleccionado.name} {cliente_seleccionado.last_name or ''}")
     
     except Exception as e:
         st.error(f"Error en POS: {e}")
@@ -427,6 +900,7 @@ elif choice == "📊 Reportes" and require_role("admin"):
     try:
         session = get_session()
         try:
+            # Reportes de ventas por día
             stmt_ventas = text("""
             SELECT 
                 DATE(ts) as fecha,
@@ -449,6 +923,7 @@ elif choice == "📊 Reportes" and require_role("admin"):
                 df_display["Total Ventas"] = df_display["Total Ventas"].apply(lambda x: format_money(x))
                 st.dataframe(df_display, use_container_width=True, hide_index=True)
             
+            # Top productos más vendidos
             stmt_top_productos = text("""
             SELECT 
                 p.name as producto,
@@ -470,16 +945,42 @@ elif choice == "📊 Reportes" and require_role("admin"):
                 st.bar_chart(chart_data.set_index("Producto")["Cantidad"])
                 st.dataframe(df_top, use_container_width=True, hide_index=True)
             
+            # Reporte de clientes frecuentes
+            stmt_clientes = text("""
+            SELECT 
+                CONCAT(c.name, ' ', COALESCE(c.last_name, '')) as cliente,
+                COUNT(o.id) as total_compras,
+                SUM(o.total) as total_gastado
+            FROM customers c
+            LEFT JOIN orders o ON c.id = o.customer_id
+            WHERE c.is_active = true
+            GROUP BY c.id, c.name, c.last_name
+            HAVING COUNT(o.id) > 0
+            ORDER BY total_compras DESC
+            LIMIT 10
+            """)
+            clientes_result = session.execute(stmt_clientes).all()
+            
+            if clientes_result:
+                st.subheader("🌟 Top 10 Clientes Frecuentes")
+                df_clientes = pd.DataFrame(clientes_result, columns=["Cliente", "Total Compras", "Total Gastado"])
+                df_clientes["Total Gastado"] = df_clientes["Total Gastado"].apply(lambda x: format_money(float(x)))
+                st.dataframe(df_clientes, use_container_width=True, hide_index=True)
+            
             st.subheader("📋 Resumen General")
             total_productos = session.query(func.count(Product.id)).scalar() or 0
             total_usuarios = session.query(func.count(User.id)).scalar() or 0
+            total_clientes = session.query(func.count(Customer.id)).scalar() or 0
             total_ordenes = session.query(func.count(Order.id)).scalar() or 0
             ingresos_totales = session.query(func.sum(Order.total)).scalar() or 0
-            col1, col2, col3, col4 = st.columns(4)
-            with col1: st.metric("🛍️ Total Productos", total_productos)
+            
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1: st.metric("🛒 Total Productos", total_productos)
             with col2: st.metric("👥 Total Usuarios", total_usuarios)
-            with col3: st.metric("🧾 Total Órdenes", total_ordenes)
-            with col4: st.metric("💰 Ingresos Totales", format_money(ingresos_totales))
+            with col3: st.metric("🙋 Total Clientes", total_clientes)
+            with col4: st.metric("🧾 Total Órdenes", total_ordenes)
+            with col5: st.metric("💰 Ingresos Totales", format_money(ingresos_totales))
+            
         finally:
             session.close()
     except Exception as e:
@@ -489,7 +990,7 @@ elif choice == "📊 Reportes" and require_role("admin"):
 elif choice == "⚙️ Administración" and require_role("admin"):
     st.title("⚙️ Panel de Administración")
     
-    tabs = st.tabs(["👥 Usuarios", "🏪 Tiendas", "🚚 Proveedores", "🧾 Ingredientes"])
+    tabs = st.tabs(["👥 Usuarios", "🏪 Tiendas", "🚚 Proveedores", "🧾 Ingredientes", "👤 Gestión Clientes"])
     
     # TAB: Usuarios
     with tabs[0]:
@@ -745,6 +1246,46 @@ elif choice == "⚙️ Administración" and require_role("admin"):
         
         except Exception as e:
             st.error(f"Error en gestión de ingredientes: {e}")
+    
+    # TAB: Gestión de Clientes (Admin)
+    with tabs[4]:
+        st.subheader("👤 Gestión Avanzada de Clientes")
+        
+        try:
+            session = get_session()
+            try:
+                clientes_completo = session.query(Customer).order_by(Customer.created_at.desc()).all()
+            finally:
+                session.close()
+            
+            if clientes_completo:
+                # Mostrar todos los clientes incluyendo inactivos
+                df_customers_admin = pd.DataFrame([{
+                    "ID": c.id,
+                    "Nombre": c.name,
+                    "Apellido": c.last_name or "",
+                    "Documento": f"{c.document_type}: {c.document_number}" if c.document_number else "N/A",
+                    "Teléfono": c.phone or "N/A",
+                    "Email": c.email or "N/A",
+                    "Estado": "✅ Activo" if c.is_active else "❌ Inactivo",
+                    "Registrado": c.created_at.strftime("%d/%m/%Y %H:%M") if c.created_at else "N/A"
+                } for c in clientes_completo])
+                
+                st.dataframe(df_customers_admin, use_container_width=True, hide_index=True)
+                
+                # Estadísticas de clientes
+                clientes_activos = len([c for c in clientes_completo if c.is_active])
+                clientes_inactivos = len([c for c in clientes_completo if not c.is_active])
+                
+                col1, col2, col3 = st.columns(3)
+                with col1: st.metric("👥 Clientes Activos", clientes_activos)
+                with col2: st.metric("❌ Clientes Inactivos", clientes_inactivos)
+                with col3: st.metric("📊 Total Clientes", len(clientes_completo))
+            else:
+                st.info("No hay clientes registrados")
+        
+        except Exception as e:
+            st.error(f"Error en gestión avanzada de clientes: {e}")
 
 else:
     if not require_login():
@@ -755,8 +1296,9 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 20px;'>
-    🥖 <strong>Sistema de Panadería v1.0</strong><br>
+    🥖 <strong>Sistema de Panadería v2.0</strong><br>
     Desarrollado con ❤️ usando Streamlit | 
-    <em>Credenciales demo: admin / admin123</em>
+    <em>Credenciales demo: admin / admin123</em><br>
+    <small>✨ Nuevas funciones: Gestión de clientes y tickets de venta</small>
 </div>
 """, unsafe_allow_html=True)
